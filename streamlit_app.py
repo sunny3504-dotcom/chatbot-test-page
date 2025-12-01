@@ -7,12 +7,45 @@ from pathlib import Path
 
 st.set_page_config(page_title="야식 챗봇 — GPT", page_icon="🍜")
 
-st.title("🍜 야식 추천 챗봇")
-st.write(
-    "야식(심야) 추천에 특화된 챗봇입니다. 간단한 설명과 주문/요리 팁을 포함하여 세 가지 맞춤형 메뉴를 제안해 드립니다. 필요 시 선호하는 메뉴(매운맛, 예산, 시간, 식단 제한 등)에 대한 명확한 질문을 하세요. 사용자가 별도로 요청하지 않는 한 답변은 한국어로 작성해 주세요."
+
+# -------------------------------------------------
+# UI 스타일
+# -------------------------------------------------
+st.markdown(
+    """
+    <style>
+        /* placeholder 스타일 */
+        textarea::placeholder {
+            font-size: 13px;
+            color: #bfbfbf !important;
+        }
+
+        /* system 메시지를 강제로 숨기는 CSS (백업용) */
+        div[data-testid="chat-message"][data-testid="chat-message-system"] {
+            display: none !important;
+        }
+    </style>
+    """,
+    unsafe_allow_html=True
 )
 
-# --- 시스템 프롬프트 편집 UI (요청사항: 제목 바로 아래에 배치) ---
+
+# -------------------------------------------------
+# 상단 제목 및 설명
+# -------------------------------------------------
+st.title("🍜 야식 추천 챗봇")
+st.write("안녕하세요. 야식(심야) 추천에 특화된 챗봇입니다")
+
+
+# -------------------------------------------------
+# 시스템 프롬프트 placeholder
+# -------------------------------------------------
+placeholder_text = (
+    "야식(심야) 추천에 특화된 챗봇입니다. 간단한 설명과 주문/요리 팁을 포함하여 세 가지 맞춤형 메뉴를 제안해 드립니다. "
+    "필요 시 선호하는 메뉴(매운맛, 예산, 시간, 식단 제한 등)에 대한 명확한 질문을 하세요. "
+    "사용자가 별도로 요청하지 않는 한 답변은 한국어로 작성해 주세요."
+)
+
 default_system_prompt = (
     "You are a friendly, concise assistant specialized in recommending late-night snacks (야식). "
     "Provide 3 tailored menu suggestions with short descriptions and ordering/cooking tips. "
@@ -20,64 +53,71 @@ default_system_prompt = (
     "Keep answers in Korean unless the user asks otherwise."
 )
 
+
+# -------------------------------------------------
+# session_state 초기화
+# -------------------------------------------------
 if "system_prompt" not in st.session_state:
     st.session_state.system_prompt = default_system_prompt
 
+if "messages" not in st.session_state:
+    # system 메시지는 API 호출용으로만 보관. 화면에는 절대 표시하지 않음.
+    st.session_state.messages = [
+        {"role": "system", "content": st.session_state.system_prompt}
+    ]
+
+
+# -------------------------------------------------
+# 시스템 프롬프트 입력 UI
+# -------------------------------------------------
 with st.form(key="system_prompt_form", clear_on_submit=False):
     prompt_input = st.text_area(
-        label="시스템 프롬프트",
-        value=st.session_state.get("system_prompt", ""),
-        placeholder=st.session_state.get("system_prompt", ""),
+        label="",         # "시스템 프롬프트" 글자 제거
+        value="",         # textarea 내부 영어 기본값 제거
+        placeholder=placeholder_text,
         height=140,
     )
     apply_btn = st.form_submit_button("적용")
+
     if apply_btn:
-        # 저장 및 messages[0]의 system 업데이트
-        st.session_state.system_prompt = prompt_input
-        if "messages" in st.session_state and len(st.session_state.messages) > 0 and st.session_state.messages[0].get("role") == "system":
-            st.session_state.messages[0]["content"] = prompt_input
+        # 비어 있으면 placeholder 내용 그대로 system prompt 로 사용
+        if prompt_input.strip() == "":
+            st.session_state.system_prompt = placeholder_text
         else:
-            # ensure system message exists at index 0
-            st.session_state.messages = [{"role": "system", "content": prompt_input}] + st.session_state.get("messages", [])
-        st.success("시스템 프롬프트가 적용되었습니다.")
+            st.session_state.system_prompt = prompt_input
+
+        # system 메시지를 항상 messages[0]에 반영
+        st.session_state.messages[0]["content"] = st.session_state.system_prompt
+
+        st.success("시스템 프롬프트가 적용되었습니다!")
 
 
+# -------------------------------------------------
+# API KEY LOAD
+# -------------------------------------------------
 def _get_choice_text(resp: Any) -> str:
     try:
-        choice = resp.choices[0]
-        # choice.message may be dict-like or object-like
-        if hasattr(choice, "message"):
-            msg = choice.message
-            return getattr(msg, "content", msg.get("content") if isinstance(msg, dict) else str(msg))
-        # fallback
-        return str(choice)
-    except Exception:
+        return resp.choices[0].message["content"]
+    except:
         return str(resp)
 
 
 def _load_api_key() -> str | None:
-    # 1) Try Streamlit secrets
     try:
-        key = st.secrets.get("OPENAI_API_KEY")
-        if key:
-            return key
-    except Exception:
+        if st.secrets.get("OPENAI_API_KEY"):
+            return st.secrets.get("OPENAI_API_KEY")
+    except:
         pass
 
-    # 2) Try environment variable
-    key = os.environ.get("OPENAI_API_KEY")
-    if key:
-        return key
+    if os.environ.get("OPENAI_API_KEY"):
+        return os.environ.get("OPENAI_API_KEY")
 
-    # 3) Try reading .streamlit/secrets.toml (accept quoted or unquoted value)
     try:
-        p = Path(".streamlit/secrets.toml")
-        if p.exists():
-            text = p.read_text(encoding="utf-8")
-            m = re.search(r'OPENAI_API_KEY\s*=\s*["\']?([^"\'\n]+)["\']?', text)
-            if m:
-                return m.group(1).strip()
-    except Exception:
+        text = Path(".streamlit/secrets.toml").read_text(encoding="utf-8")
+        m = re.search(r'OPENAI_API_KEY\s*=\s*["\']?([^"\'\n]+)["\']?', text)
+        if m:
+            return m.group(1).strip()
+    except:
         pass
 
     return None
@@ -85,60 +125,46 @@ def _load_api_key() -> str | None:
 
 api_key = _load_api_key()
 if not api_key:
-    st.error(
-        "OpenAI API 키가 설정되어 있지 않습니다. `.streamlit/secrets.toml`에 `OPENAI_API_KEY = \"your_key\"` 형태로 추가하거나 환경변수 `OPENAI_API_KEY`를 설정하세요.",
-        icon="❗",
-    )
+    st.error("OpenAI API 키가 설정되어 있지 않습니다.", icon="❗")
     st.stop()
 
 client = OpenAI(api_key=api_key)
 
 
-# Initialize chat history with a system prompt focused on late-night snack recommendations
-if "messages" not in st.session_state:
-    st.session_state.messages = [
-        {
-            "role": "system",
-            "content": (
-                "You are a friendly, concise assistant specialized in recommending late-night snacks (야식). "
-                "Provide 3 tailored menu suggestions with short descriptions and ordering/cooking tips. "
-                "Ask clarifying questions about preferences (spiciness, budget, time, dietary restrictions) when needed. "
-                "Keep answers in Korean unless the user asks otherwise."
-            ),
-        }
-    ]
-
-
-# Render existing messages
+# -------------------------------------------------
+# 기존 메시지 렌더링 (system 메시지는 절대 화면에 출력하지 않음)
+# -------------------------------------------------
 for m in st.session_state.messages:
+    if m["role"] == "system":
+        continue  # 👈 system 메시지는 화면에 표시하지 않고 API용으로만 사용
     with st.chat_message(m["role"]):
         st.markdown(m["content"])
 
 
-# Chat input: no API key input (per requirements), direct use
+# -------------------------------------------------
+# 사용자 입력
+# -------------------------------------------------
 user_prompt = st.chat_input("무슨 야식이 먹고 싶으세요? (예: 매콤한/담백한, 배달/직접조리, 예산 등)")
+
 if user_prompt:
+    # 화면 표시
     st.session_state.messages.append({"role": "user", "content": user_prompt})
     with st.chat_message("user"):
         st.markdown(user_prompt)
 
-    messages_for_api = [
-        {"role": m["role"], "content": m["content"]} for m in st.session_state.messages
-    ]
+    # GPT 호출
+    response = client.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=st.session_state.messages,
+        temperature=0.8,
+        max_tokens=500,
+    )
 
-    try:
-        with st.spinner("추천을 생성 중입니다…"):
-            resp = client.chat.completions.create(
-                model="gpt-4o-mini",
-                messages=messages_for_api,
-                max_tokens=500,
-                temperature=0.8,
-            )
-        assistant_text = _get_choice_text(resp)
-    except Exception as e:
-        st.error(f"OpenAI API 호출 중 오류가 발생했습니다: {e}")
-        assistant_text = "죄송합니다. 응답 생성에 실패했습니다. 잠시 후 다시 시도해주세요."
+    assistant_text = _get_choice_text(response)
 
+    # assistant 메시지 저장
     st.session_state.messages.append({"role": "assistant", "content": assistant_text})
+
+    # 화면 출력
     with st.chat_message("assistant"):
         st.markdown(assistant_text)
